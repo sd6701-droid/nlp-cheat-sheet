@@ -252,8 +252,7 @@ $$\text{head}_i = \text{Attn}(QW_i^Q, KW_i^K, VW_i^V)$$</div>
 <p>Stack of masked self-attention layers only (no encoder). Autoregressive: generates one token at a time. Final layer: linear projection + softmax over vocabulary. Used by GPT-2/3, LLaMA.</p>
 
 <h3>Efficiency Concerns</h3>
-<p>Self-attn complexity: $O(n^2 \cdot d)$ where $n$ = seq length and $d$ = hidden/attention dimension (size of the Q/K/V vectors). <b>KV cache:</b> during inference, cache K,V for all past tokens → avoid recomputation.</p>
-<p><b>Grouped Query Attention (GQA):</b> groups multiple query heads to share the same key and value projections, cutting KV-cache size and attention computation while preserving multi-head expressiveness. <b>Multi-Head Latent Attention:</b> first projects inputs into a lower-dimensional latent space and performs attention there, then maps back, reducing memory and compute with minimal loss in modeling power.</p>
+<p>Self-attn complexity: $O(n^2 \cdot d)$ where $n$ = seq length. <b>KV cache:</b> during inference, cache K,V for all past tokens → avoid recomputation. <b>Grouped Query Attention (GQA):</b> multiple query heads share same K,V → fewer params and less memory. <b>Intuition:</b> reduces KV-cache memory by sharing K,V across head groups. <b>Multi-Head Latent Attention:</b> map input to smaller latent vectors before computing attention. <b>Intuition:</b> compresses input to a bottleneck first, reducing memory.</p>
 
 </div>
 </div>
@@ -300,12 +299,11 @@ $$\text{head}_i = \text{Attn}(QW_i^Q, KW_i^K, VW_i^V)$$</div>
 <tr><td>Encoder-only (MLM)</td><td>Bidirectional</td><td>BERT, RoBERTa, DeBERTa</td><td>Classification, NER, QA</td></tr>
 <tr><td>Decoder-only (Causal LM)</td><td>Left-to-right</td><td>GPT-2/3/4, LLaMA</td><td>Generation</td></tr>
 <tr><td>Encoder-Decoder</td><td>Both</td><td>T5, BART, MASS</td><td>Translation, summarization</td></tr>
-<tr><td>Prefixed-LM</td><td>Both</td><td>T5</td><td>Prediction but with additional context</td></tr>
 </table>
 <p><b>Intuition:</b> encoder-only = understand, decoder-only = generate, encoder-decoder = read then write.</p>
 
 <h3>BERT</h3>
-<p>Encoder-only. <b>Base:</b> 12 layers, 768 hidden, 12 heads, 110M. <b>Large:</b> 24 layers, 1024 hidden, 16 heads, 340M. <b>Training objectives:</b> (1) <b>MLM:</b> mask 15% of tokens (80% [MASK], 10% random, 10% unchanged) → predict original. (2) <b>NSP:</b> given sentence A and B, predict if B is the actual next sentence. <b>Usage:</b> [CLS] token for sentence-level classification; token outputs for NER; predict start/end positions for extractive QA. the input is (token embed + position + segment)</p>
+<p>Encoder-only. <b>Base:</b> 12 layers, 768 hidden, 12 heads, 110M. <b>Large:</b> 24 layers, 1024 hidden, 16 heads, 340M. <b>Training objectives:</b> (1) <b>MLM:</b> mask 15% of tokens (80% [MASK], 10% random, 10% unchanged) → predict original. (2) <b>NSP:</b> given sentence A and B, predict if B is the actual next sentence. <b>Usage:</b> [CLS] token for sentence-level classification; token outputs for NER; predict start/end positions for extractive QA.</p>
 
 <h3>BERT Extensions</h3>
 <p><b>RoBERTa:</b> more data, longer training, dynamic masking (re-mask each epoch), removes NSP, larger batches. <b>DeBERTa:</b> disentangled attention (separate content and position), enhanced mask decoder.</p>
@@ -323,31 +321,46 @@ $$\text{head}_i = \text{Attn}(QW_i^Q, KW_i^K, VW_i^V)$$</div>
 <p><b>BitFit:</b> fine-tune only bias terms (tiny fraction of params). <b>Adapters:</b> insert small FFN layers into each transformer layer; train only adapters. <b>LoRA (Low-Rank Adaptation):</b></p>
 <div class="f">$$W' = W + \Delta W = W + BA \;\;\text{where}\;\; B \in \mathbb{R}^{d \times r}, A \in \mathbb{R}^{r \times d}, \; r \ll d$$</div>
 <p>Only $B$ and $A$ are trained. Drastically reduces trainable parameters (e.g., $r = 8$ vs. $d = 4096$).</p>
-<p><b>Intuition:</b> freeze the big matrix and learn only a small low-rank correction, so adaptation is cheap; works especially well for small fine-tuning datasets and gives most benefit when applied to MLP layers (applying LoRA to attention weights adds little beyond this).</p>
+<p><b>Intuition:</b> freeze the big matrix and learn only a small low-rank correction, so adaptation is cheap.</p>
 
 <h2>L7: POST-TRAINING &amp; RLHF</h2>
 
 <h3>Goals of Post-Training</h3>
 <p>Align model to human preferences (helpful, harmless, honest). Distill reasoning ability. Extend context length. Post-training turns a base LM into a useful assistant.</p>
 
-<h3>RL Basics &amp; LLM Mapping</h3>
-<p><b>MDP:</b> $(S, A, T, R, \pi)$. Policy $\pi_\theta(a \mid s)$ maps states to action distributions. Objective: maximize $\mathbb{E}[\sum_t \gamma^t r_t]$. <b>LLM mapping:</b> state = tokens so far; action = next token; $T(s,a) = [s;a]$; policy = LM $p_\theta(x_t \mid x_{&lt;t})$; trajectory = full generation $x_1,\ldots,x_T$.</p>
+<h3>RL Formalization &amp; LLM Mapping</h3>
+<p><b>MDP comps:</b> $S$ states, $s_1 \in S$ initial state, $A$ actions, $T:S \times A \to S$ transition, $r:S \times A \to \mathbb{R}$ reward. <b>Policy:</b> $\pi(a \mid s)=\mathbb{P}(A=a \mid S=s)$ = distribution over actions given state.</p>
+<div class="f">$$\tau=(a_1,s_1,\ldots,a_T,s_T) \qquad \max_\theta \; \mathbb{E}_{\tau \sim p_\theta(\tau)}\left[\sum_{t=1}^T r(s_t,a_t)\right]$$</div>
+<p><b>LLM mapping:</b> $s_t=(x_1,\ldots,x_{t-1})$, $a_t=x_t$, $T(s,a)=[s;a]$, policy $=p_\theta(x_t \mid x_{&lt;t})$, trajectory = full generation $x_1,\ldots,x_T$. RL = choose token distribution so sampled completions get high total reward.</p>
 
 <h3>REINFORCE (Policy Gradient)</h3>
-<p>Gradient via log-derivative trick: $\nabla_\theta J = \mathbb{E}_\tau[\sum_t \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot R(\tau)]$. Monte Carlo: sample $N$ trajectories, estimate gradient, update. <b>For LLMs:</b> sample $N$ generations, score each, weight each token log-prob gradient by total reward. <b>Issues:</b> high variance, hard credit assignment, sparse/delayed reward.</p>
+<div class="f">$$\nabla_\theta J(\theta)=\mathbb{E}_{\tau \sim p_\theta(\tau)}\left[\left(\sum_{t=1}^T \nabla_\theta \log \pi_\theta(a_t \mid s_t)\right)\left(\sum_{t=1}^T r(s_t,a_t)\right)\right]$$</div>
+<p><b>Key idea:</b> log-derivative trick turns gradient of expectation into expectation of gradient. <b>Monte Carlo:</b> sample $N$ trajectories, form $\hat{g}$, update $\theta \leftarrow \theta + \alpha \hat{g}$. <b>LLM intuition:</b> sample $N$ generations, score each, multiply every token log-prob gradient by total reward; positive reward pushes sampled tokens up, negative reward pushes them down. <b>Issues:</b> high variance; credit assignment = late/sparse reward gives weak signal about which token mattered.</p>
+
+<h3>Reward Model Training</h3>
+<p><b>Why pairwise?</b> Humans are noisy at absolute 1-10 scoring, more consistent at "which is better?". <b>Data:</b> $(x,y_w,y_l)$ = prompt, winning output, losing output.</p>
+<div class="f">$$P(y_w \succ y_l)=\sigma\big(r_\theta([\bar{x};\bar{y}_w]) - r_\theta([\bar{x};\bar{y}_l])\big)$$
+$$\mathcal{L}_r=-\mathbb{E}\left[\log \sigma\big(r_\theta([\bar{x};\bar{y}_w]) - r_\theta([\bar{x};\bar{y}_l])\big)\right]$$</div>
+<p><b>Bradley-Terry:</b> reward difference induces preference probability. <b>Intuition:</b> binary ranking loss raises winner score, lowers loser score. <b>Iterative:</b> e.g. Llama 2 used multiple rounds: train model/ranker -&gt; sample -&gt; annotate -&gt; retrain; more data + bigger models usually improve RM quality.</p>
 
 <h3>RLHF Pipeline</h3>
 <p><b>Step 1 — Preference data:</b> for each prompt, generate two outputs; human picks preferred one → dataset of $(x, y_w, y_l)$ triplets. Pairwise comparison more reliable than absolute ratings.</p>
-<p><b>Step 2 — Reward model:</b> predict scalar preference score. Uses <b>Bradley-Terry model:</b></p>
-<div class="f">$$P(y_w \succ y_l) = \sigma\big(r_\theta(y_w) - r_\theta(y_l)\big) \quad \mathcal{L} = -\log \sigma\big(r_\theta(y_w) - r_\theta(y_l)\big)$$</div>
-<p>Binary ranking loss maximizes margin between winning and losing scores.</p>
-<p><b>Why pairwise?</b> Humans are noisy at absolute 1-10 scoring but much more consistent at comparisons. Bradley-Terry turns pairwise preferences into a scalar reward model.</p>
-<p><b>Intuition:</b> reward model learns a hidden better-than scale from pairwise wins/losses instead of unreliable absolute scores.</p>
-<p><b>Step 3a — PPO:</b> actor-critic method. Value function $V_\phi(s)$ estimates expected return from state $s$. <b>Advantage</b> $A_t = R_t - V_\phi(s_t)$ measures how much better the action was than expected, reducing variance. KL penalty $\beta \cdot D_{KL}(\pi_\theta \| \pi_{\text{ref}})$ keeps policy near the SFT reference. Requires <b>4 models in memory:</b> policy $\pi_\theta$, value $V_\phi$, reward model $r$, reference $\pi_{\text{ref}}$. <b>On-policy:</b> needs fresh samples each iteration.</p>
-<p><b>KL intuition:</b> a rubber band to the SFT model: improve reward, but do not drift too far.</p>
-<p><b>Step 3b — DPO (Direct Preference Optimization):</b> keep the same preference pairs, but optimize a direct loss instead of training a separate reward model:</p>
-<div class="f">$$\mathcal{L}_{\text{DPO}} = -\log \sigma\!\left(\beta \log \frac{\pi_\theta(y_w \mid x)}{\pi_{\text{ref}}(y_w \mid x)} - \beta \log \frac{\pi_\theta(y_l \mid x)}{\pi_{\text{ref}}(y_l \mid x)}\right)$$</div>
-<p><b>Key insight:</b> derive the optimal policy in closed form from the reward model, then plug it straight into the preference loss. This implicitly defines $r(x,y) = \beta \log \frac{\pi_\theta(y \mid x)}{\pi_{\text{ref}}(y \mid x)}$. <b>Off-policy:</b> trains on a fixed preference dataset. Simpler than PPO but can be less stable on hard tasks.</p>
+<p><b>Step 2 — Reward model:</b> fit pairwise ranker $r_\theta$. <b>Step 3 — optimize policy:</b> either PPO (explicit RM + RL) or DPO (direct preference loss, no separate RM).</p>
+
+<h3>PPO</h3>
+<div class="f">$$\arg\max_\theta \; E_\pi\left[\frac{\pi_\theta(a\mid s)}{\pi_{\theta_{\text{old}}}(a\mid s)} \hat{A}(s,a) - \beta\, \mathrm{KL}[\pi_{\theta_{\text{old}}}(\cdot\mid s),\pi_\theta(\cdot\mid s)]\right]$$</div>
+<p><b>Advantage:</b> $A_\pi(s,a)=r(s,a)+V_\pi(T(s,a)) - V_\pi(s)$ = how much better action was than expected. <b>Critic:</b> learned value $V_\phi(s)$ estimates expected future reward, giving a baseline and lowering variance vs raw reward. <b>KL term:</b> keeps policy near previous/reference policy for stability - rubber band to SFT model.</p>
+<p><b>4 models in memory:</b> policy $\pi_\theta$, value network $V_\phi$, reward model $r$, reference policy $\pi_{\text{ref}}$ (frozen SFT copy). <b>On-policy:</b> must sample fresh completions from current policy each iteration. <b>Intuition:</b> PPO = REINFORCE + critic baseline + trust-region/KL control; more hyperparams/engineering, but more stable.</p>
+
+<h3>DPO (Direct Preference Optimization)</h3>
+<p><b>Motivation:</b> PPO/RLHF is heavy: reward model training, RL instability, 4 models in memory. Can preferences be learned directly? <b>Starting point:</b> same KL-constrained RL objective. <b>Key insight:</b> solve for optimal policy, plug into Bradley-Terry; partition function $Z(\bar{x})$ cancels.</p>
+<div class="f">$$\mathcal{L}_{\text{DPO}}(\theta) = -E_{(\bar{x},\bar{y}_w,\bar{y}_l) \sim \mathcal{D}}\left[\log \sigma\left(\beta \log \frac{\pi_\theta(\bar{y}_w\mid\bar{x})}{\pi_{\text{ref}}(\bar{y}_w\mid\bar{x})} - \beta \log \frac{\pi_\theta(\bar{y}_l\mid\bar{x})}{\pi_{\text{ref}}(\bar{y}_l\mid\bar{x})}\right)\right]$$</div>
+<p><b>Implicit reward:</b> $\hat{r}(\bar{x},\bar{y}) = \beta \log \frac{\pi_\theta(\bar{y}\mid\bar{x})}{\pi_{\text{ref}}(\bar{y}\mid\bar{x})}$, so no separate reward model. <b>2 models only:</b> trainable policy $\pi_\theta$ + frozen reference $\pi_{\text{ref}}$. <b>Off-policy:</b> trains on fixed preference dataset, no fresh rollout loop.</p>
+<div class="f">$$\nabla \mathcal{L} = -\beta E\left[\underbrace{\sigma(\hat{r}_l - \hat{r}_w)}_{\text{higher when wrong}}\left(\underbrace{\nabla \log \pi_\theta(\bar{y}_w\mid\bar{x})}_{\uparrow \text{preferred}} - \underbrace{\nabla \log \pi_\theta(\bar{y}_l\mid\bar{x})}_{\downarrow \text{dispreferred}}\right)\right]$$</div>
+<p><b>Gradient intuition:</b> $\beta$ scales update / KL strength. $\sigma(\hat{r}_l-\hat{r}_w)$ is a per-example weight: big when model ranks loser too highly, small when it already gets pair correct. Push winner up, loser down.</p>
+
+<h3>Baselines &amp; Variants</h3>
+<p><b>Best-of-$N$:</b> sample $N$ outputs from SFT, score with RM/verifier, pick best; no weight update, but inference-expensive. <b>Preference tuning:</b> SFT on preferred outputs only; simple, ignores negative signal from loser. <b>GRPO:</b> DeepSeek-R1-style variant; compute advantage relative to a group of sampled responses instead of a separate value network.</p>
 
 <h3>Post-Training Algorithm Comparison</h3>
 <table>
@@ -355,14 +368,15 @@ $$\text{head}_i = \text{Attn}(QW_i^Q, KW_i^K, VW_i^V)$$</div>
 <tr><td>Reward model</td><td>Required (ext.)</td><td>Required (ext.)</td><td>Implicit (no RM)</td></tr>
 <tr><td># models in memory</td><td>2 (policy+RM)</td><td>4 (policy,value,RM,ref)</td><td>2 (policy+ref)</td></tr>
 <tr><td>On/Off-policy</td><td>On-policy</td><td>On-policy</td><td>Off-policy</td></tr>
+<tr><td>Main signal</td><td>Raw return</td><td>Advantage + KL</td><td>Pairwise pref. loss</td></tr>
 <tr><td>Variance</td><td>High</td><td>Lower (adv.)</td><td>Low (sup.-style)</td></tr>
-<tr><td>Complexity</td><td>Simple</td><td>Complex (4 models)</td><td>Simple (1 loss)</td></tr>
-<tr><td>Stability</td><td>Unstable</td><td>More stable (KL)</td><td>Stable; may plateau</td></tr>
+<tr><td>Complexity</td><td>Simple</td><td>Complex (4 models, hypers)</td><td>Simple (single loss)</td></tr>
+<tr><td>Stability</td><td>Unstable</td><td>More stable (KL + clipping)</td><td>Stable; may plateau</td></tr>
 <tr><td>Sample efficiency</td><td>Low</td><td>Moderate</td><td>High (fixed data)</td></tr>
 </table>
 
 <h3>Alignment Issues</h3>
-<p><b>Reward hacking:</b> exploit reward metric (e.g., longer responses get higher reward). <b>Sycophancy:</b> agrees with user even when user is wrong. <b>Sandbagging:</b> worse answers for "less educated" users. <b>Annotator disagreement:</b> noisy, inconsistent feedback due to varying expertise/backgrounds.</p>
+<p><b>Reward hacking / length bias:</b> RM can overvalue longer answers; older datasets saw large reward gains explained mainly by verbosity (~85% in some analyses). <b>Sycophancy:</b> model agrees with user's stated belief even when false; tends to rise with RL steps/model size. <b>Sandbagging:</b> weaker answers for prompts framing user as less educated. <b>Annotator disagreement:</b> preference labels are noisy and value-laden.</p>
 <p><b>RL with Verifiers:</b> for checkable tasks (math, code), use a verifier instead of a learned reward model to reduce reward hacking. Generate $N$ candidates → verifier scores → pick best. Common in modern post-training pipelines.</p>
 
 <h2>KEY FORMULA REFERENCE</h2>
